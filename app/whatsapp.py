@@ -124,3 +124,6 @@ def msg_store() -> str:
     for key, item in STORE_ITEMS.items():
         lines.append(f"{item['name']} — {item['cost']} 🪙\n_{item['description']}_\nBuy: */buy {key}*\n")
     return "\n".join(lines)
+
+def send_message(to, message):
+    return send_text(to, message)

@@ -91,3 +91,20 @@ class Inventory(db.Model):
     power = db.Column(db.String(50), nullable=False)  # double_points | score_shield | mvp_hint
     quantity = db.Column(db.Integer, default=0)
     __table_args__ = (db.UniqueConstraint("user_id", "power", name="unique_user_power"),)
+
+
+class TournamentPick(db.Model):
+    __tablename__ = "tournament_picks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    team = db.Column(db.String(100), nullable=False)
+    furthest_round = db.Column(db.String(50), default=None)
+    points_earned = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="tournament_picks")
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "team", name="unique_user_team"),
+    )
