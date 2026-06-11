@@ -1,34 +1,29 @@
 """
-WhatsApp Cloud API — message sending helpers.
+Twilio WhatsApp API — message sending helpers.
 """
-import requests
+from twilio.rest import Client
 from flask import current_app
-
-WA_API_URL = "https://graph.facebook.com/v19.0/{phone_id}/messages"
-
-
-def _headers():
-    return {
-        "Authorization": f"Bearer {current_app.config['WHATSAPP_TOKEN']}",
-        "Content-Type": "application/json",
-    }
-
-
-def _url():
-    return WA_API_URL.format(phone_id=current_app.config["WHATSAPP_PHONE_ID"])
 
 
 def send_text(to: str, message: str):
-    """Send a plain text message."""
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": message},
-    }
-    r = requests.post(_url(), json=payload, headers=_headers())
-    r.raise_for_status()
-    return r.json()
+    """Send a plain text message via Twilio."""
+    client = Client(
+        current_app.config["TWILIO_ACCOUNT_SID"],
+        current_app.config["TWILIO_AUTH_TOKEN"]
+    )
+
+    clean_to = to
+    if not clean_to.startswith("whatsapp:"):
+        if not clean_to.startswith("+"):
+            clean_to = "+" + clean_to
+        clean_to = f"whatsapp:{clean_to}"
+
+    res = client.messages.create(
+        from_=current_app.config["TWILIO_WHATSAPP_NUMBER"],
+        to=clean_to,
+        body=message
+    )
+    return res.sid
 
 
 def send_group_text(group_id: str, message: str):

@@ -16,46 +16,23 @@ admin_bp = Blueprint("admin", __name__)
 
 # ─── WhatsApp Webhook ─────────────────────────────────────────────────────────
 
-@webhook_bp.route("/webhook", methods=["GET"])
-def verify_webhook():
-    """WhatsApp Cloud API webhook verification."""
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    if mode == "subscribe" and token == current_app.config["VERIFY_TOKEN"]:
-        return challenge, 200
-    return "Forbidden", 403
-
-
 @webhook_bp.route("/webhook", methods=["POST"])
 def receive_message():
-    """Receive incoming messages from WhatsApp."""
-    data = request.get_json()
+    """Receive incoming messages from Twilio WhatsApp."""
+    phone = request.form.get("From", "").replace("whatsapp:", "").replace("+", "").strip()
+    text = request.form.get("Body", "").strip()
+
+    if not phone or not text:
+        return jsonify({"status": "invalid_payload"}), 200
 
     try:
-        entry = data["entry"][0]
-        changes = entry["changes"][0]
-        value = changes["value"]
-
-        if "messages" not in value:
-            return jsonify({"status": "no_message"}), 200
-
-        message = value["messages"][0]
-        phone = message["from"]
-        msg_type = message.get("type", "")
-
-        if msg_type != "text":
-            return jsonify({"status": "non_text"}), 200
-
-        text = message["text"]["body"].strip()
         reply = dispatch_command(phone, text)
 
         if reply:
             send_text(phone, reply)
 
-    except (KeyError, IndexError, TypeError) as e:
-        current_app.logger.error(f"Webhook parse error: {e}")
+    except Exception as e:
+        current_app.logger.error(f"Webhook processing error: {e}")
 
     return jsonify({"status": "ok"}), 200
 

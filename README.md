@@ -43,14 +43,12 @@ cp .env.example .env
 # Fill in your values
 ```
 
-### 3. Get WhatsApp Cloud API credentials
+### 3. Get Twilio WhatsApp Sandbox credentials
 
-1. Go to [developers.facebook.com](https://developers.facebook.com)
-2. Create an App → Business → WhatsApp
-3. Under WhatsApp → API Setup, copy:
-   - **Phone Number ID** → `WHATSAPP_PHONE_ID`
-   - **Temporary Access Token** → `WHATSAPP_TOKEN` (use permanent token for production)
-4. Set your `VERIFY_TOKEN` to any random string
+1. Sign up/log in to [twilio.com](https://www.twilio.com)
+2. Go to the Twilio Console and copy your **Account SID** and **Auth Token**.
+3. Set up the WhatsApp Sandbox under Messaging → Try it out → Send a WhatsApp message.
+4. Copy the Twilio WhatsApp Sandbox number (e.g. `whatsapp:+14155238886`).
 
 ### 4. Set up PostgreSQL
 
@@ -71,12 +69,10 @@ Use [ngrok](https://ngrok.com) for local dev:
 ngrok http 5000
 ```
 
-Set webhook URL in Meta dashboard:
+Set webhook URL in Twilio Sandbox console:
 ```
 https://your-ngrok-url.ngrok.io/webhook
 ```
-
-Verification token = whatever you set in `VERIFY_TOKEN`
 
 ---
 
@@ -158,7 +154,7 @@ Phone numbers must be in international format without `+`.
 ```bash
 railway init
 railway up
-railway variables set WHATSAPP_TOKEN=... WHATSAPP_PHONE_ID=... VERIFY_TOKEN=... DATABASE_URL=...
+railway variables set TWILIO_ACCOUNT_SID=... TWILIO_AUTH_TOKEN=... TWILIO_WHATSAPP_NUMBER=... DATABASE_URL=...
 ```
 
 ### Render
