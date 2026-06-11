@@ -88,7 +88,7 @@ class Inventory(db.Model):
     __tablename__ = "inventory"
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
-    power = db.Column(db.String(50), nullable=False)  # double_points | score_shield | mvp_hint
+    power = db.Column(db.String(50), nullable=False)
     quantity = db.Column(db.Integer, default=0)
     __table_args__ = (db.UniqueConstraint("user_id", "power", name="unique_user_power"),)
 
@@ -108,3 +108,15 @@ class TournamentPick(db.Model):
     __table_args__ = (
         db.UniqueConstraint("user_id", "team", name="unique_user_team"),
     )
+
+
+class ConversationSession(db.Model):
+    """Persists multi-step conversation state across server restarts."""
+    __tablename__ = "conversation_sessions"
+
+    id    = db.Column(db.Integer, primary_key=True)
+    phone = db.Column(db.String(20), unique=True, nullable=False, index=True)
+    flow  = db.Column(db.String(20), nullable=False)   # "predict" | "result"
+    step  = db.Column(db.String(20), nullable=False)   # "winner"  | "score"
+    data  = db.Column(db.Text, default="{}")           # JSON blob
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -2,11 +2,43 @@
 Command handlers — parse commands from incoming WhatsApp messages.
 """
 
-from datetime import datetime, timedelta
-from .database import db, User, Match, Prediction, Result, Inventory, TournamentPick
+import json
+import re
+import shlex
+from datetime import datetime
+from .database import db, User, Match, Prediction, Result, Inventory, TournamentPick, ConversationSession
 from .scoring import calculate_score, STORE_ITEMS
 from .achievements import check_and_award
 from .whatsapp import send_message
+
+# ─────────────────────────────────────────────
+#  CONVERSATION STATE  (DB-backed, survives restarts)
+#  Uses ConversationSession model in database.py
+# ─────────────────────────────────────────────
+
+def get_session(phone):
+    row = ConversationSession.query.filter_by(phone=phone).first()
+    if not row:
+        return None
+    return {"flow": row.flow, "step": row.step, "data": json.loads(row.data)}
+
+
+def set_session(phone, flow, step, data=None):
+    row = ConversationSession.query.filter_by(phone=phone).first()
+    if row:
+        row.flow = flow
+        row.step = step
+        row.data = json.dumps(data or {})
+    else:
+        row = ConversationSession(phone=phone, flow=flow, step=step, data=json.dumps(data or {}))
+        db.session.add(row)
+    db.session.commit()
+
+
+def clear_session(phone):
+    ConversationSession.query.filter_by(phone=phone).delete()
+    db.session.commit()
+
 
 # ─────────────────────────────────────────────
 #  TOURNAMENT CONFIG
@@ -72,7 +104,6 @@ def cmd_help(user):
         f"{fmt_sep()}\n\n"
         f"📋 *COMMANDS*\n\n"
         f"🔮 */predict [id]* — Submit your match prediction\n"
-        f"📋 */copy [id]* — Get the prediction form\n"
         f"🏆 */leaderboard* — Top 10 players\n"
         f"👤 */profile* — Your stats & achievements\n"
         f"🎯 */pick5* — Pick 5 teams to go far in the tournament\n\n"
@@ -310,145 +341,12 @@ def cmd_use(user, parts):
 
 
 # ─────────────────────────────────────────────
-#  /copy  (prediction form)
-# ─────────────────────────────────────────────
-
-def cmd_copy(user, parts):
-    if len(parts) < 2 or not parts[1].isdigit():
-        return (
-            f"📋 *Get Prediction Form*\n"
-            f"{fmt_sep()}\n"
-            f"Usage: */copy [match_id]*\n"
-            f"Example: `copy 3`\n\n"
-            f"_Find match IDs on the match announcements!_ ⚽"
-        )
-    match = Match.query.get(int(parts[1]))
-    if not match:
-        return (
-            f"❌ *Match Not Found*\n"
-            f"{fmt_sep()}\n"
-            f"_No match with ID #{parts[1]}._\n\n"
-            f"_Check the latest announcements for valid IDs._ 📢"
-        )
-    return (
-        f"📋 *Prediction Form — Match #{match.id}*\n"
-        f"⚽ *{match.team1}* vs *{match.team2}*\n"
-        f"{fmt_sep()}\n"
-        f"Copy the template below and fill it in:\n\n"
-        f"```\n"
-        f"predict {match.id}\n"
-        f"winner: [team name]\n"
-        f"score: [e.g. 2-1]\n"
-        f"mvp: [player name]\n"
-        f"top1: [player]\n"
-        f"top2: [player]\n"
-        f"top3: [player]\n"
-        f"```\n\n"
-        f"_Send the filled form back to submit!_ ✅"
-    )
-
-
-# ─────────────────────────────────────────────
-#  /predict
-# ─────────────────────────────────────────────
-
-def cmd_predict(user, parts, body):
-    if len(parts) < 2 or not parts[1].isdigit():
-        return (
-            f"🔮 *Submit Prediction*\n"
-            f"{fmt_sep()}\n"
-            f"Usage: */predict [match_id]*\n"
-            f"Get the form with: */copy [match_id]*\n\n"
-            f"_Example: `copy 3` then fill it!_ ✏️"
-        )
-    match = Match.query.get(int(parts[1]))
-    if not match:
-        return (
-            f"❌ *Match Not Found*\n"
-            f"{fmt_sep()}\n"
-            f"_No match with ID #{parts[1]}._\n\n"
-            f"_Check the latest announcements for valid IDs._ 📢"
-        )
-    if match.status != "open":
-        return (
-            f"🔒 *Predictions Closed*\n"
-            f"{fmt_sep()}\n"
-            f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
-            f"_This match is no longer accepting predictions._\n"
-            f"_Stay ready for the next one!_ ⏰"
-        )
-    if datetime.utcnow() >= match.start_time:
-        return (
-            f"⏰ *Too Late!*\n"
-            f"{fmt_sep()}\n"
-            f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
-            f"_The match has already started. Predictions are closed._\n"
-            f"_Be early next time!_ 🏃"
-        )
-
-    lines = body.strip().splitlines()
-    data = {}
-    for line in lines[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            data[k.strip().lower()] = v.strip()
-
-    existing = Prediction.query.filter_by(user_id=user.id, match_id=match.id).first()
-    if existing:
-        existing.winner = data.get("winner", existing.winner)
-        existing.score  = data.get("score",  existing.score)
-        existing.mvp    = data.get("mvp",    existing.mvp)
-        existing.top1   = data.get("top1",   existing.top1)
-        existing.top2   = data.get("top2",   existing.top2)
-        existing.top3   = data.get("top3",   existing.top3)
-        db.session.commit()
-        return (
-            f"✏️ *Prediction Updated!*\n"
-            f"{fmt_sep()}\n"
-            f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
-            f"🏆 Winner: *{existing.winner}*\n"
-            f"📊 Score: *{existing.score}*\n"
-            f"⭐ MVP: *{existing.mvp}*\n\n"
-            f"_Good luck! Results after the match._ 🍀"
-        )
-
-    pred = Prediction(
-        user_id=user.id,
-        match_id=match.id,
-        winner=data.get("winner"),
-        score=data.get("score"),
-        mvp=data.get("mvp"),
-        top1=data.get("top1"),
-        top2=data.get("top2"),
-        top3=data.get("top3"),
-    )
-    db.session.add(pred)
-    user.predictions_count += 1
-    db.session.commit()
-    check_and_award(user)
-    return (
-        f"✅ *Prediction Submitted!*\n"
-        f"{fmt_sep()}\n"
-        f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
-        f"🏆 Winner: *{data.get('winner', '—')}*\n"
-        f"📊 Score: *{data.get('score', '—')}*\n"
-        f"⭐ MVP: *{data.get('mvp', '—')}*\n\n"
-        f"_May the best call win!_ 🔮🍀"
-    )
-
-
-# ─────────────────────────────────────────────
 #  /pick5  (tournament team picks)
 # ─────────────────────────────────────────────
 
 def cmd_pick5(user, parts):
-    """
-    /pick5 Brazil, France, Germany, Argentina, England
-    Or /pick5 alone → show current picks / instructions
-    """
     existing = TournamentPick.query.filter_by(user_id=user.id).all()
 
-    # Show instructions if no teams given
     if len(parts) < 2:
         if existing:
             lines = "\n".join(
@@ -480,11 +378,9 @@ def cmd_pick5(user, parts):
             f"  👑 Champion — 10,000 pts\n\n"
             f"📝 *How to submit:*\n"
             f"`pick5 Brazil, France, Germany, Argentina, England`\n\n"
-            f"_{fmt_sep()}_\n"
             f"_Picks are locked after submission — choose wisely!_ 🔒"
         )
 
-    # Already picked
     if existing:
         return (
             f"🔒 *Picks Already Locked!*\n"
@@ -494,7 +390,6 @@ def cmd_pick5(user, parts):
             f"_Good luck — watch those points roll in!_ 🍀"
         )
 
-    # Parse teams
     raw = " ".join(parts[1:])
     teams = [t.strip() for t in raw.split(",") if t.strip()]
     if len(teams) != 5:
@@ -525,131 +420,332 @@ def cmd_pick5(user, parts):
 
 
 # ─────────────────────────────────────────────
-#  ADMIN: /creatematch
+#  CONVERSATIONAL /predict  FLOW
+#
+#  Step 1: /predict 12         → bot asks "Who will win?"
+#  Step 2: user replies "1"    → bot asks "What will be the score?"
+#  Step 3: user replies "2-1"  → bot confirms & saves
 # ─────────────────────────────────────────────
 
-def cmd_creatematch(user, parts, body):
-    """
-    /creatematch
-    team1: Brazil
-    team2: France
-    time: 2026-07-01 18:00
-    """
-    lines = body.strip().splitlines()
-    data = {}
-    for line in lines[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            data[k.strip().lower()] = v.strip()
-
-    required = ["team1", "team2", "time"]
-    missing = [r for r in required if r not in data]
-    if missing:
+def cmd_predict_start(user, parts):
+    """Entry point: /predict [match_id]"""
+    if len(parts) < 2 or not parts[1].isdigit():
         return (
-            f"⚙️ *Create Match*\n"
+            f"🔮 *Submit Prediction*\n"
             f"{fmt_sep()}\n"
-            f"Missing fields: *{', '.join(missing)}*\n\n"
-            f"Format:\n"
-            f"```\ncreatematch\nteam1: Brazil\nteam2: France\ntime: 2026-07-01 18:00\n```"
+            f"Usage: */predict [match_id]*\n"
+            f"Example: `/predict 12`\n\n"
+            f"_Find the Match ID in the announcement message._ 📢"
         )
+
+    match = Match.query.get(int(parts[1]))
+    if not match:
+        return (
+            f"❌ *Match Not Found*\n"
+            f"{fmt_sep()}\n"
+            f"_No match with ID #{parts[1]}._\n\n"
+            f"_Check the latest announcements for valid IDs._ 📢"
+        )
+    if match.status != "open":
+        return (
+            f"🔒 *Predictions Closed*\n"
+            f"{fmt_sep()}\n"
+            f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
+            f"_This match is no longer accepting predictions._\n"
+            f"_Stay ready for the next one!_ ⏰"
+        )
+    if datetime.utcnow() >= match.start_time:
+        return (
+            f"⏰ *Too Late!*\n"
+            f"{fmt_sep()}\n"
+            f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
+            f"_The match has already started. Predictions are closed._\n"
+            f"_Be early next time!_ 🏃"
+        )
+
+    # Start conversation session
+    set_session(user.phone, "predict", "winner", {"match_id": match.id})
+
+    return (
+        f"🔮 *Prediction — Match #{match.id}*\n"
+        f"{fmt_sep()}\n"
+        f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
+        f"*Who will win?*\n\n"
+        f"  1️⃣  {match.team1}\n"
+        f"  2️⃣  {match.team2}\n"
+        f"  3️⃣  Draw\n\n"
+        f"_Reply with 1, 2, or 3_"
+    )
+
+
+def cmd_predict_winner(user, session, body):
+    """Step 2: capture winner choice, ask for score."""
+    match_id = session["data"]["match_id"]
+    match = Match.query.get(match_id)
+    text = body.strip()
+
+    if text == "1":
+        winner = match.team1
+    elif text == "2":
+        winner = match.team2
+    elif text == "3":
+        winner = "Draw"
+    else:
+        return (
+            f"❓ *Please reply with 1, 2, or 3*\n\n"
+            f"  1️⃣  {match.team1}\n"
+            f"  2️⃣  {match.team2}\n"
+            f"  3️⃣  Draw"
+        )
+
+    # Save winner, advance to score step
+    session["data"]["winner"] = winner
+    set_session(user.phone, "predict", "score", session["data"])
+
+    return (
+        f"✅ *Winner:* {winner}\n\n"
+        f"⚽ *What will be the final score?*\n"
+        f"_{match.team1} — {match.team2}_\n\n"
+        f"Example: `2-1`"
+    )
+
+
+def cmd_predict_score(user, session, body):
+    """Step 3: capture score, save prediction."""
+    match_id = session["data"]["match_id"]
+    winner   = session["data"]["winner"]
+    match    = Match.query.get(match_id)
+    score    = body.strip()
+
+    # Basic score format validation (e.g. 2-1, 0-0, 10-3)
+    if not re.match(r"^\d{1,2}-\d{1,2}$", score):
+        return (
+            f"❓ *Invalid format.*\n\n"
+            f"Please enter the score like this: `2-1`\n"
+            f"_(Goals for {match.team1} — Goals for {match.team2})_"
+        )
+
+    # Save or update prediction
+    existing = Prediction.query.filter_by(user_id=user.id, match_id=match.id).first()
+    if existing:
+        existing.winner = winner
+        existing.score  = score
+        db.session.commit()
+        clear_session(user.phone)
+        return (
+            f"✏️ *Prediction Updated!*\n"
+            f"{fmt_sep()}\n"
+            f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
+            f"🏆 *Winner:* {winner}\n"
+            f"📊 *Score:* {score}\n\n"
+            f"_Good luck! Results after the match._ 🍀"
+        )
+
+    pred = Prediction(
+        user_id=user.id,
+        match_id=match.id,
+        winner=winner,
+        score=score,
+    )
+    db.session.add(pred)
+    user.predictions_count += 1
+    db.session.commit()
+    check_and_award(user)
+    clear_session(user.phone)
+
+    return (
+        f"✅ *Prediction Saved!*\n"
+        f"{fmt_sep()}\n"
+        f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
+        f"🏆 *Winner:* {winner}\n"
+        f"📊 *Score:* {score}\n\n"
+        f"_May the best call win!_ 🔮🍀"
+    )
+
+
+# ─────────────────────────────────────────────
+#  ADMIN: /creatematch  (inline format)
+#
+#  /creatematch Brazil France 15-Jun-2026 20:00
+# ─────────────────────────────────────────────
+
+def cmd_creatematch(user, body):
+    """
+    Supports both single-word and quoted multi-word team names.
+
+    Single-word teams (no quotes needed):
+      /creatematch Brazil France 15-Jun-2026 20:00
+
+    Multi-word teams (use quotes):
+      /creatematch "Real Madrid" "Manchester City" 15-Jun-2026 20:00
+      /creatematch "Paris Saint-Germain" France 15-Jun-2026 20:00
+
+    Date format: DD-Mon-YYYY  (e.g. 15-Jun-2026)
+    Time format: HH:MM        (24-hour, e.g. 20:00)
+    """
+    USAGE = (
+        f"⚙️ *Create Match*\n"
+        f"{fmt_sep()}\n"
+        f"Single-word teams:\n"
+        f"`/creatematch Brazil France 15-Jun-2026 20:00`\n\n"
+        f"Multi-word teams (use quotes):\n"
+        f'`/creatematch "Real Madrid" "Man City" 15-Jun-2026 20:00`'
+    )
+
+    # Use shlex to split respecting quoted strings, then drop the command token
+    try:
+        tokens = shlex.split(body)
+    except ValueError:
+        return USAGE
+    tokens = tokens[1:]  # drop "/creatematch"
+
+    if len(tokens) < 4:
+        return USAGE
+
+    # Last two tokens are always date and time; everything before is team1 team2
+    date_str = tokens[-2]
+    time_str = tokens[-1]
+    team_tokens = tokens[:-2]   # everything between command and date
+
+    if len(team_tokens) < 2:
+        return USAGE
+
+    # If exactly 2 tokens remain they're team1 and team2 directly (shlex already
+    # handled the quoted case). For unquoted multi-word: not supported — user must quote.
+    team1 = team_tokens[0]
+    team2 = team_tokens[1]
 
     try:
-        start_time = datetime.strptime(data["time"], "%Y-%m-%d %H:%M")
+        start_time = datetime.strptime(f"{date_str} {time_str}", "%d-%b-%Y %H:%M")
     except ValueError:
         return (
-            f"❌ *Invalid Time Format*\n"
+            f"❌ *Invalid Date/Time Format*\n"
             f"{fmt_sep()}\n"
-            f"Use: `YYYY-MM-DD HH:MM`\n"
-            f"Example: `2026-07-01 18:00`"
+            f"Use: `DD-Mon-YYYY HH:MM`\n"
+            f"Example: `15-Jun-2026 20:00`"
         )
 
-    match = Match(team1=data["team1"], team2=data["team2"], start_time=start_time)
+    match = Match(team1=team1, team2=team2, start_time=start_time)
     db.session.add(match)
     db.session.commit()
 
-    # Broadcast match announcement to all players
+    # Broadcast to all users
     announcement = (
-        f"📣 *NEW MATCH ANNOUNCED!*\n"
+        f"🔥 *NEW MATCH OPEN* 🔥\n"
         f"{fmt_sep()}\n"
-        f"⚽ *{match.team1}* 🆚 *{match.team2}*\n"
-        f"🕐 *Kick-off:* {start_time.strftime('%d %b %Y • %H:%M')} UTC\n"
-        f"🆔 *Match ID:* #{match.id}\n\n"
-        f"📋 Get form: `/copy {match.id}`\n"
-        f"🔮 Submit: `/predict {match.id}`\n\n"
+        f"⚽ *{team1}* vs *{team2}*\n"
+        f"🆔 *Match ID:* {match.id}\n"
+        f"⏰ *Kickoff:* {start_time.strftime('%d %B %Y, %I:%M %p')}\n"
+        f"{fmt_sep()}\n\n"
+        f"To participate, send:\n"
+        f"*/predict {match.id}*\n\n"
+        f"_Predictions close at kickoff._\n"
         f"{fmt_sep()}\n"
-        f"_Predictions close at kick-off — don't miss it!_ ⏰"
+        f"Good luck! 🏆"
     )
     broadcast(announcement, exclude_phone=user.phone)
 
     return (
         f"✅ *Match Created!*\n"
         f"{fmt_sep()}\n"
-        f"⚽ *{match.team1}* vs *{match.team2}*\n"
-        f"🕐 *Kick-off:* {start_time.strftime('%d %b %Y • %H:%M')} UTC\n"
-        f"🆔 *Match ID:* #{match.id}\n\n"
+        f"⚽ *{team1}* vs *{team2}*\n"
+        f"🆔 *Match ID:* #{match.id}\n"
+        f"⏰ *Kickoff:* {start_time.strftime('%d %B %Y, %I:%M %p')}\n\n"
         f"📢 _Announcement sent to all players!_ ✅"
     )
 
 
 # ─────────────────────────────────────────────
-#  ADMIN: /result
+#  ADMIN: /result  (conversational)
+#
+#  Step 1: /result 12        → bot asks "Enter Winner:"
+#  Step 2: admin types name  → bot asks "Enter Final Score:"
+#  Step 3: admin types score → saves, scores all, broadcasts
 # ─────────────────────────────────────────────
 
-def cmd_result(user, parts, body):
-    """
-    /result [match_id]
-    winner: Brazil
-    score: 2-1
-    mvp: Neymar
-    top1: Neymar
-    top2: Mbappe
-    top3: Vinicius
-    """
-    lines = body.strip().splitlines()
+def cmd_result_start(user, parts):
+    """Entry point: /result [match_id]"""
     if len(parts) < 2 or not parts[1].isdigit():
         return (
             f"⚙️ *Enter Result*\n"
             f"{fmt_sep()}\n"
-            f"Format:\n"
-            f"```\nresult [match_id]\nwinner: Brazil\nscore: 2-1\nmvp: Neymar\ntop1: Neymar\ntop2: Mbappe\ntop3: Vinicius\n```"
+            f"Usage: `/result [match_id]`\n"
+            f"Example: `/result 12`"
         )
 
     match = Match.query.get(int(parts[1]))
     if not match:
         return f"❌ Match #{parts[1]} not found."
 
-    data = {}
-    for line in lines[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            data[k.strip().lower()] = v.strip()
+    if match.status == "completed":
+        return (
+            f"⚠️ *Match Already Completed*\n"
+            f"{fmt_sep()}\n"
+            f"⚽ *{match.team1}* vs *{match.team2}* has already been scored."
+        )
+
+    set_session(user.phone, "result", "winner", {"match_id": match.id})
+
+    return (
+        f"⚙️ *Enter Result — Match #{match.id}*\n"
+        f"{fmt_sep()}\n"
+        f"⚽ *{match.team1}* vs *{match.team2}*\n\n"
+        f"*Enter Winner:*\n"
+        f"_(Type the winning team's name, or 'Draw')_"
+    )
+
+
+def cmd_result_winner(user, session, body):
+    """Step 2: capture winner, ask for score."""
+    session["data"]["winner"] = body.strip()
+    match_id = session["data"]["match_id"]
+    match = Match.query.get(match_id)
+    set_session(user.phone, "result", "score", session["data"])
+
+    return (
+        f"✅ *Winner:* {session['data']['winner']}\n\n"
+        f"*Enter Final Score:*\n"
+        f"_{match.team1} — {match.team2}_\n\n"
+        f"Example: `2-1`"
+    )
+
+
+def cmd_result_score(user, session, body):
+    """Step 3: capture score, save result, score all predictions, broadcast."""
+    score = body.strip()
+
+    if not re.match(r"^\d{1,2}-\d{1,2}$", score):
+        return (
+            f"❓ *Invalid format.*\n\n"
+            f"Please enter the score like this: `2-1`"
+        )
+
+    match_id = session["data"]["match_id"]
+    winner   = session["data"]["winner"]
+    match    = Match.query.get(match_id)
 
     result = Result(
         match_id=match.id,
-        winner=data.get("winner"),
-        score=data.get("score"),
-        mvp=data.get("mvp"),
-        top1=data.get("top1"),
-        top2=data.get("top2"),
-        top3=data.get("top3"),
+        winner=winner,
+        score=score,
     )
     db.session.add(result)
     match.status = "completed"
     db.session.commit()
+    clear_session(user.phone)
 
-    # Score all predictions
+    # ── Score all predictions ──────────────────
     predictions = Prediction.query.filter_by(match_id=match.id).all()
-    scored = []
     for pred in predictions:
-        pts = calculate_score(pred, result)
+        pts = _calculate_simple_score(pred.winner, pred.score, winner, score)
         pred.points_awarded = pts
         pred.user.points += pts
-        if pts > 0:
-            scored.append((pred.user, pts))
+        if pts == 500:  # perfect
+            pred.user.perfect_predictions += 1
         db.session.commit()
         check_and_award(pred.user)
 
-    # Build leaderboard snapshot
+    # ── Leaderboard snapshot ───────────────────
     top = User.query.order_by(User.points.desc()).limit(5).all()
     medals = ["🥇", "🥈", "🥉", "🔹", "🔹"]
     lb_lines = "\n".join(
@@ -657,29 +753,27 @@ def cmd_result(user, parts, body):
         for i, u in enumerate(top)
     )
 
-    # Broadcast result + scores to everyone
+    # ── Personal result message to each predictor ──
     for pred in predictions:
         u = pred.user
+        winner_correct = pred.winner == winner
+        score_correct  = pred.score  == score
+        pts_earned     = pred.points_awarded
+
         personal = (
-            f"⚽ *MATCH RESULT*\n"
+            f"🏆 *MATCH RESULT*\n"
             f"{fmt_sep()}\n"
-            f"*{match.team1}* 🆚 *{match.team2}*\n"
-            f"🏆 *Winner:* {result.winner}\n"
-            f"📊 *Score:* {result.score}\n"
-            f"⭐ *MVP:* {result.mvp}\n\n"
-            f"🎯 *Your Prediction:*\n"
-            f"  Winner: {pred.winner} {'✅' if pred.winner == result.winner else '❌'}\n"
-            f"  Score: {pred.score} {'✅' if pred.score == result.score else '❌'}\n"
-            f"  MVP: {pred.mvp} {'✅' if pred.mvp == result.mvp else '❌'}\n\n"
-            f"⭐ *Points Earned:* +{pred.points_awarded}\n"
+            f"⚽ *{match.team1}* {score} *{match.team2}*\n\n"
+            f"*Your Prediction:*\n"
+            f"  Winner: {pred.winner} {'✅' if winner_correct else '❌'}\n"
+            f"  Score:  {pred.score}  {'✅' if score_correct  else '❌'}\n\n"
+            f"⭐ *Points Earned:* +{pts_earned}\n"
             f"🏦 *Total Points:* {u.points}\n\n"
-            f"🏆 *Top 5 Right Now:*\n{lb_lines}\n\n"
-            f"{fmt_sep()}\n"
-            f"_Keep predicting to climb higher!_ 🚀"
+            f"_Use /leaderboard to see rankings._"
         )
         send_message(u.phone, personal)
 
-    # Notify users who had no prediction
+    # ── Notify non-predictors ──────────────────
     predicted_ids = {p.user_id for p in predictions}
     all_users = User.query.all()
     for u in all_users:
@@ -687,47 +781,85 @@ def cmd_result(user, parts, body):
             send_message(u.phone, (
                 f"⚽ *MATCH RESULT*\n"
                 f"{fmt_sep()}\n"
-                f"*{match.team1}* 🆚 *{match.team2}*\n"
-                f"🏆 *Winner:* {result.winner}\n"
-                f"📊 *Score:* {result.score}\n\n"
+                f"*{match.team1}* {score} *{match.team2}*\n"
+                f"🏆 *Winner:* {winner}\n\n"
                 f"😔 _You didn't predict this match — don't miss the next one!_\n\n"
-                f"🏆 *Top 5:*\n{lb_lines}\n\n"
-                f"{fmt_sep()}\n"
-                f"_Stay sharp!_ ⚡"
+                f"_View standings: /leaderboard_ 🏆"
             ))
 
+    # ── Public broadcast to all ────────────────
+    broadcast_msg = (
+        f"🏆 *FULL TIME*\n"
+        f"{fmt_sep()}\n"
+        f"⚽ *{match.team1}* {score} *{match.team2}*\n\n"
+        f"_Predictions have been scored._\n\n"
+        f"View your score: */profile*\n"
+        f"View leaderboard: */leaderboard*"
+    )
+    # Send to everyone except admin (they get the summary below)
+    for u in User.query.all():
+        if u.phone != user.phone:
+            send_message(u.phone, broadcast_msg)
+
     return (
-        f"✅ *Result Entered!*\n"
+        f"✅ *Result Entered & Scored!*\n"
         f"{fmt_sep()}\n"
         f"⚽ *{match.team1}* vs *{match.team2}*\n"
-        f"🏆 Winner: *{result.winner}*\n"
-        f"📊 Score: *{result.score}*\n\n"
-        f"📢 *{len(predictions)} players* notified with scores!\n\n"
+        f"🏆 *Winner:* {winner}\n"
+        f"📊 *Score:* {score}\n\n"
+        f"📢 *{len(predictions)} player(s)* scored & notified!\n\n"
         f"🏆 *Top 5:*\n{lb_lines}"
     )
+
+
+def _calculate_simple_score(pred_winner, pred_score, actual_winner, actual_score):
+    """
+    Points system:
+      Correct winner only  → 100 pts
+      Correct score only   → 300 pts  (implies correct winner too)
+      Perfect (both)       → 500 pts
+    """
+    winner_correct = pred_winner == actual_winner
+    score_correct  = pred_score  == actual_score
+
+    if winner_correct and score_correct:
+        return 500   # perfect
+    if score_correct:
+        return 300   # exact score (winner implied correct if score is exact)
+    if winner_correct:
+        return 100   # just winner
+    return 0
 
 
 # ─────────────────────────────────────────────
 #  ADMIN: /advanceteam  (tournament round update)
 # ─────────────────────────────────────────────
 
-def cmd_advanceteam(user, parts):
+def cmd_advanceteam(user, body):
     """
-    /advanceteam [team] [round]
-    e.g. /advanceteam Brazil quarterfinal
+    /advanceteam Brazil quarterfinal
+    /advanceteam "Real Madrid" semifinal
+    Round key is always the LAST token; team name is everything before it.
     Rounds: round_of_16 | quarterfinal | semifinal | final | champion
     """
-    if len(parts) < 3:
-        return (
-            f"⚙️ *Advance a Team*\n"
-            f"{fmt_sep()}\n"
-            f"Usage: */advanceteam [team] [round]*\n\n"
-            f"Rounds: `round_of_16` | `quarterfinal` | `semifinal` | `final` | `champion`\n\n"
-            f"Example: `advanceteam Brazil quarterfinal`"
-        )
+    USAGE = (
+        f"⚙️ *Advance a Team*\n"
+        f"{fmt_sep()}\n"
+        f"Single-word:  `/advanceteam Brazil quarterfinal`\n"
+        f'Multi-word:   `/advanceteam "Real Madrid" semifinal`\n\n'
+        f"Rounds: `round_of_16` | `quarterfinal` | `semifinal` | `final` | `champion`"
+    )
+    try:
+        tokens = shlex.split(body)
+    except ValueError:
+        return USAGE
+    tokens = tokens[1:]  # drop "/advanceteam"
 
-    team = parts[1]
-    round_key = parts[2].lower()
+    if len(tokens) < 2:
+        return USAGE
+
+    round_key = tokens[-1].lower()          # last token is always the round
+    team      = " ".join(tokens[:-1])       # everything else is the team name
 
     if round_key not in ROUND_POINTS:
         return (
@@ -740,15 +872,15 @@ def cmd_advanceteam(user, parts):
     if not picks:
         return f"⚠️ No one picked *{team}* — no points awarded."
 
-    pts = ROUND_POINTS[round_key]
+    pts   = ROUND_POINTS[round_key]
     label = ROUND_LABELS[round_key]
     emoji, ach_name, ach_desc = TOURNAMENT_ACHIEVEMENTS[round_key]
     notified = 0
 
     for pick in picks:
-        pick.furthest_round = round_key
-        pick.points_earned = (pick.points_earned or 0) + pts
-        pick.user.points += pts
+        pick.furthest_round   = round_key
+        pick.points_earned    = (pick.points_earned or 0) + pts
+        pick.user.points     += pts
         db.session.commit()
         check_and_award(pick.user)
 
@@ -778,15 +910,43 @@ def cmd_advanceteam(user, parts):
 #  MAIN DISPATCHER
 # ─────────────────────────────────────────────
 
-ADMIN_PHONES = ["whatsapp:+919409688470"] # ← Replace with your number
+# Must match the format routes.py sends: "whatsapp:" and "+" are already stripped there
+ADMIN_PHONES = ["919409688470"]  # ← your admin number (no "whatsapp:" prefix, no "+")
+
 
 def handle_message(phone, body):
-    user = get_or_create_user(phone)
-    parts = body.strip().split()
+    user  = get_or_create_user(phone)
+    body  = body.strip()
+    parts = body.split()
+
     if not parts:
         return cmd_help(user)
 
-    cmd = parts[0].lstrip("/").lower()
+    # ── Check if user is mid-conversation ─────
+    session = get_session(phone)
+    if session:
+        # Allow /cancel anywhere to abort
+        if parts[0].lstrip("/").lower() == "cancel":
+            clear_session(phone)
+            return "❌ *Cancelled.* Send any command to continue."
+
+        flow = session["flow"]
+        step = session["step"]
+
+        if flow == "predict":
+            if step == "winner":
+                return cmd_predict_winner(user, session, body)
+            elif step == "score":
+                return cmd_predict_score(user, session, body)
+
+        elif flow == "result":
+            if step == "winner":
+                return cmd_result_winner(user, session, body)
+            elif step == "score":
+                return cmd_result_score(user, session, body)
+
+    # ── Normal command routing ─────────────────
+    cmd      = parts[0].lstrip("/").lower()
     is_admin = phone in ADMIN_PHONES
 
     if cmd == "help":
@@ -805,18 +965,16 @@ def handle_message(phone, body):
         return cmd_inventory(user)
     elif cmd == "use":
         return cmd_use(user, parts)
-    elif cmd == "copy":
-        return cmd_copy(user, parts)
     elif cmd == "predict":
-        return cmd_predict(user, parts, body)
+        return cmd_predict_start(user, parts)
     elif cmd == "pick5":
         return cmd_pick5(user, parts)
     elif cmd == "creatematch" and is_admin:
-        return cmd_creatematch(user, parts, body)
+        return cmd_creatematch(user, body)
     elif cmd == "result" and is_admin:
-        return cmd_result(user, parts, body)
+        return cmd_result_start(user, parts)
     elif cmd == "advanceteam" and is_admin:
-        return cmd_advanceteam(user, parts)
+        return cmd_advanceteam(user, body)
     else:
         return (
             f"🤔 *Unknown Command*\n"
