@@ -14,6 +14,16 @@ webhook_bp = Blueprint("webhook", __name__)
 admin_bp = Blueprint("admin", __name__)
 
 
+# ─── Home Route ───────────────────────────────────────────────────────────────
+
+@webhook_bp.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "FIFA Predictor WhatsApp Bot is running successfully!"
+    }), 200
+
+
 # ─── WhatsApp Webhook ─────────────────────────────────────────────────────────
 
 @webhook_bp.route("/webhook", methods=["POST"])
