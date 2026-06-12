@@ -1,37 +1,65 @@
 """
-Twilio WhatsApp API — message sending helpers.
+Meta WhatsApp Cloud API — message sending helpers.
 """
-from twilio.rest import Client
+import os
+import requests
 from flask import current_app
+
+GRAPH_API_VERSION = "v19.0"
+
+
+def _graph_url():
+    phone_number_id = current_app.config["WHATSAPP_PHONE_NUMBER_ID"]
+    return f"https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages"
+
+
+def _headers():
+    token = current_app.config["WHATSAPP_ACCESS_TOKEN"]
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
 
 def send_text(to: str, message: str):
-    """Send a plain text message via Twilio."""
-    client = Client(
-        current_app.config["TWILIO_ACCOUNT_SID"],
-        current_app.config["TWILIO_AUTH_TOKEN"]
-    )
+    """
+    Send a plain text message via Meta WhatsApp Cloud API.
+    `to` is a bare digit phone number (e.g. '919409688470') — same
+    format already used throughout handlers.py.
+    """
+    clean_to = to.replace("whatsapp:", "").replace("+", "").strip()
 
-    clean_to = to
-    if not clean_to.startswith("whatsapp:"):
-        if not clean_to.startswith("+"):
-            clean_to = "+" + clean_to
-        clean_to = f"whatsapp:{clean_to}"
+    # Meta hard limit is 4096 chars per text message; split if needed
+    MAX_LEN = 4000
+    chunks = [message[i:i + MAX_LEN] for i in range(0, len(message), MAX_LEN)] or [""]
 
-    res = client.messages.create(
-        from_=current_app.config["TWILIO_WHATSAPP_NUMBER"],
-        to=clean_to,
-        body=message
-    )
-    return res.sid
+    last_resp = None
+    for chunk in chunks:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": clean_to,
+            "type": "text",
+            "text": {"body": chunk, "preview_url": False},
+        }
+        try:
+            resp = requests.post(_graph_url(), headers=_headers(), json=payload, timeout=15)
+            if resp.status_code >= 400:
+                current_app.logger.error(
+                    f"WhatsApp send failed ({resp.status_code}): {resp.text}"
+                )
+            last_resp = resp
+        except requests.RequestException as e:
+            current_app.logger.error(f"WhatsApp send exception: {e}")
+
+    return last_resp.json().get("messages", [{}])[0].get("id") if last_resp else None
 
 
 def send_group_text(group_id: str, message: str):
-    """Send text to a group (same API call, different 'to')."""
+    """Kept for compatibility — not used by Meta Cloud API directly."""
     return send_text(group_id, message)
 
 
-# ─── Message Templates ────────────────────────────────────────────────────────
+# ─── Message Templates (UNCHANGED — keep as-is) ───────────────────────────────
 
 def msg_new_match(match) -> str:
     return (
@@ -124,6 +152,7 @@ def msg_store() -> str:
     for key, item in STORE_ITEMS.items():
         lines.append(f"{item['name']} — {item['cost']} 🪙\n_{item['description']}_\nBuy: */buy {key}*\n")
     return "\n".join(lines)
+
 
 def send_message(to, message):
     return send_text(to, message)
