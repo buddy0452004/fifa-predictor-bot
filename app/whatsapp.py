@@ -21,6 +21,31 @@ def _headers():
     }
 
 
+def send_welcome_template(to: str, name: str):
+    """Send the approved fifa_bot welcome template (works for first-contact users)."""
+    clean_to = to.replace("whatsapp:", "").replace("+", "").strip()
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": clean_to,
+        "type": "template",
+        "template": {
+            "name": "fifa_bot",
+            "language": {"code": "en_US"},
+            "components": [
+                {"type": "body", "parameters": [{"type": "text", "text": name}]}
+            ]
+        }
+    }
+    try:
+        resp = requests.post(_graph_url(), headers=_headers(), json=payload, timeout=15)
+        if resp.status_code >= 400:
+            current_app.logger.error(f"Template send failed ({resp.status_code}): {resp.text}")
+        return resp
+    except requests.RequestException as e:
+        current_app.logger.error(f"Template send exception: {e}")
+        return None
+
+
 def send_text(to: str, message: str):
     """
     Send a plain text message via Meta WhatsApp Cloud API.

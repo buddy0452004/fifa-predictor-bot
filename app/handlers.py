@@ -9,7 +9,7 @@ from datetime import datetime
 from .database import db, User, Match, Prediction, Result, Inventory, TournamentPick, ConversationSession
 from .scoring import calculate_score, STORE_ITEMS
 from .achievements import check_and_award
-from .whatsapp import send_message
+from .whatsapp import send_message, send_welcome_template
 
 # ─────────────────────────────────────────────
 #  CONVERSATION STATE  (DB-backed, survives restarts)
@@ -82,6 +82,7 @@ def get_or_create_user(phone):
         user = User(phone=phone, name=phone[-4:])
         db.session.add(user)
         db.session.commit()
+        send_welcome_template(phone, user.name)
     return user
 
 
